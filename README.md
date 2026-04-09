@@ -1,150 +1,168 @@
-# ⚖️ Fake News Debater
+# Fake News Debater
 
-**Production-Ready Multi-Agent AI System for Automated Misinformation Detection**
+**Multi-agent misinformation analysis with adversarial retrieval, Groq-based reasoning, and explainable verdicts**
 
-A high-fidelity, research-grade NLP + Agentic AI project that uses adversarial debate between autonomous agents to fact-check news articles — with built-in explainability, resilience, and speed optimizations.
+Fake News Debater is a Streamlit app that breaks an article into factual claims, sends two agents to argue opposite sides with web evidence, and then produces both claim-level and article-level verdicts with visible confidence metrics.
 
 ---
 
-## 🏗️ Architecture & Pipeline
+## Architecture
 
 ```text
-User submits news article (or URL)
+User submits article text or URL
          |
          v
-   [Claim Extractor]          ← spaCy NER + Groq LLM
+   [Claim Extractor]          <- spaCy NER + Groq
          |
     _____|_____
     |         |
     v         v
-[Verifier]  [Falsifier]       ← Both search the web independently
- Agent       Agent              (Parallel Execution)
+[Verifier]  [Falsifier]       <- Independent search + scraping
+ Agent       Agent               + Groq stance classification
     |         |
- Evidence   Evidence          ← HuggingFace NLI Stance Detection
-    |_________|                 (Parallelized, router API)
+ Evidence   Evidence
+    |_________|
          |
          v
-   [Judge Agent]              ← Impartial judge evaluates arguments
-         |                      and delivers verdict
+   [Judge Agent]              <- Claim-level verdicts
+         |                       + deterministic article scoring
          v
- Final Verdict + Report       ← JSON Export available
+ Final Verdict + Report       <- JSON export + confidence metric bar
 ```
 
-### Detailed Agent Workflow
+### Current pipeline
 
-1. **Claim Extractor** — Uses spaCy Named Entity Recognition to anchor key entities (People, Orgs, Dates, Locations). The article text and entities are sent to Groq LLM (with forced JSON parsing logic) to systematically extract 3-5 verifiable factual claims.
-2. **Verifier Agent (Pro-Truth)** — Generates independent search queries aiming to validate the claim. It retrieves search results, scrapes the web pages (capped at 1,500 chars for speed), runs NLI-based stance detection to find supporting evidence, and constructs a persuasive verification argument.
-3. **Falsifier Agent (Counter-Truth)** — Works in parallel with the Verifier, but runs adversarial search queries aiming to debunk the claim. It utilizes the same stance-detection framework to isolate contradictions and constructs a counter-argument.
-4. **Judge Agent** — Acts as the impartial arbitrator. It weighs the raw evidence surface area against the rhetoric of both agents, delivering targeted claim-level verdicts (SUPPORTED / REFUTED / UNVERIFIABLE), confidence metrics, and an overall article judgment (REAL / FAKE / MISLEADING).
+1. **Claim extraction**
+Uses spaCy entity extraction plus Groq to generate 3 to 5 verifiable claims from the article.
 
----
+2. **Verifier / falsifier debate**
+Each claim is searched independently. Top results are scraped, then each evidence passage is classified by Groq as `SUPPORT`, `CONTRADICT`, or `NEUTRAL`.
 
-## 🚀 Key Features & Upgrades
+3. **Claim-level judging**
+The judge reviews both sides and returns `SUPPORTED`, `REFUTED`, or `UNVERIFIABLE` for each claim.
 
-This system has been upgraded for production readiness with several robust engineering mechanisms:
+4. **Article-level verdict**
+The final article label is now scored deterministically from the claim verdicts, producing:
+- `REAL`
+- `FAKE`
+- `MISLEADING`
 
-- **Parallel Processing:** Verifier and Falsifier agent pipelines run concurrently using Python's `ThreadPoolExecutor`. Furthermore, stance detection on fetched evidence runs in parallel for rapid inference.
-- **Resilient LLM Client (`groq_client.py`):** Features a thread-safe singleton pattern and exponential backoff retry logic for `429 Rate Limit` and `5xx Server Error` statuses.
-- **Robust Inference API:** Uses the latest HuggingFace Router infrastructure (`router.huggingface.co`) for stable deployment of the `DeBERTa-v3` NLI stance detection model.
-- **Result Caching:** Inputs are hashed (`sha256`); if an identical article is submitted, the expensive pipeline is bypassed and cached results are rendered instantly.
-- **Input Validation:** Strict parsing ensures articles meet length requirements (50 chars min, 50,000 chars max).
-- **JSON Exportability:** Built-in capability to download the full debate logic, claims, evidence, and verdicts as an interoperable JSON file.
-- **Premium UI:** Deployed on Streamlit with custom CSS injecting a modern, glassmorphic dark-theme design.
+This avoids the old issue where a final free-form LLM call could overuse `MISLEADING`.
 
 ---
 
-## 🛠️ Tech Stack & Economics
+## Key Features
 
-| Component | Tool / Library | Infrastructure / Cost |
-|-----------|----------------|-----------------------|
-| LLM Reasoning | Groq API (Llama 3.3 70B) | Free Tier (14.4k req/day) |
-| Web Search | DuckDuckGo + Serper.dev | Free Tier |
-| NLP & NER | spaCy (`en_core_web_sm`) | Free (Offline/Local) |
-| Stance Detection | HuggingFace Inference API (NLI) | Free Serverless Router |
-| Frontend | Streamlit | UI Rendering |
-| Execution | Python 3.13, ThreadPoolExecutor| Concurrency |
+- **Adversarial retrieval:** verifier and falsifier search independently for supporting and contradicting evidence.
+- **Groq-first pipeline:** claim extraction, stance classification, and judging all run through Groq.
+- **Deterministic article scoring:** article verdicts are computed from claim outcomes instead of relying on a final unconstrained model guess.
+- **Confidence visualization:** the UI shows both the winning confidence and a three-way metric bar for `REAL`, `FAKE`, and `MISLEADING`.
+- **Parallel execution:** verifier and falsifier run concurrently, and evidence scoring is parallelized per claim.
+- **Result caching:** repeated analysis of the same article is served from session cache.
+- **JSON export:** full analysis can be downloaded for later review.
 
 ---
 
-## 💻 Quick Start
+## Tech Stack
 
-### 1. Clone & Environment Setup
+| Component | Tool / Library | Notes |
+|-----------|----------------|-------|
+| Reasoning | Groq API (`llama-3.3-70b-versatile`) | Claims, stance, and judging |
+| Web Search | DuckDuckGo + Serper.dev | Serper optional |
+| NLP / NER | spaCy (`en_core_web_sm`) | Local entity extraction |
+| Frontend | Streamlit | Main UI |
+| Scraping | `requests` + BeautifulSoup | Article and evidence extraction |
+| Execution | Python 3.13 + `ThreadPoolExecutor` | Parallel agent work |
+
+---
+
+## Quick Start
+
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/Draco-0704/debator.git
 cd debator
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Download local NLP model for entity extraction
 python -m spacy download en_core_web_sm
 ```
 
-### 2. Configure API Keys
+### 2. Configure environment
 
-Create a `.env` file in the root directory (this is `.gitignore`'d for security):
+Create a `.env` file in the project root:
 
 ```env
 GROQ_API_KEY=your_groq_api_key
 SERPER_API_KEY=your_serper_key
-HF_API_TOKEN=your_huggingface_token
+HF_API_TOKEN=optional_legacy_token
 ```
 
-### 3. Run the App
+Notes:
+- `GROQ_API_KEY` is required.
+- `SERPER_API_KEY` is optional. Without it, the app falls back to DuckDuckGo.
+- `HF_API_TOKEN` is no longer required for stance detection.
+
+### 3. Run the app
 
 ```bash
 streamlit run app.py
 ```
-View the dashboard at `http://localhost:8501`.
+
+Open `http://localhost:8501`.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```text
 debater/
-├── agents/                    # Core Agent Logic
-│   ├── claim_extractor.py     # spaCy + Groq parsing
-│   ├── verifier_agent.py      # Pro-truth retrieval pipeline
-│   ├── falsifier_agent.py     # Debunking retrieval pipeline
-│   └── judge_agent.py         # Verdict generation
-├── tools/                     # Utilities & Integrations
-│   ├── article_scraper.py     # BeautifulSoup HTML text extractor
-│   ├── groq_client.py         # Resilient LLM wrapper with backoff
-│   ├── stance_detector.py     # HF NLI stance classification
-│   └── web_search.py          # DDG + Serper search engine operations
-├── tests/                     # Unit test suites
-│   ├── test_judge_agent.py
-│   └── test_stance_detector.py
-├── app.py                     # Streamlit frontend & UI definitions
-├── config.py                  # Global parameters & limits
-├── requirements.txt           # Python dependencies
-└── .gitignore
+|-- agents/
+|   |-- claim_extractor.py
+|   |-- verifier_agent.py
+|   |-- falsifier_agent.py
+|   `-- judge_agent.py
+|-- tools/
+|   |-- article_scraper.py
+|   |-- groq_client.py
+|   |-- stance_detector.py
+|   `-- web_search.py
+|-- tests/
+|   |-- test_judge_agent.py
+|   |-- test_overall_verdict.py
+|   `-- test_stance_detector.py
+|-- app.py
+|-- config.py
+|-- requirements.txt
+`-- README.md
 ```
 
 ---
 
-## 🧪 Testing
+## Testing
 
-The project includes unit testing for core logic and label mapping.
-Run tests using:
+Run the unit tests with:
 
 ```bash
-python -m unittest discover tests/ -v
+py -m unittest discover tests -v
 ```
 
----
-
-## 🔬 Research Significance
-
-This project demonstrates a major shift in automated fact-checking:
-1. **Adversarial Framing:** Two agents with explicitly opposing objectives eliminate "yes-man" confirmation bias that plagues single-model checkers.
-2. **Deterministic Evidence Scoring:** Instead of relying entirely on LLM hallucination-prone text understanding, the pipeline anchors truth using a dedicated NLI (Natural Language Inference) transformer.
-3. **Traceable Explainability:** The system does not just output a percentage confidence; the entire debate log IS the explanation.
+Current tests cover:
+- stance result parsing
+- evidence formatting for the judge
+- deterministic article-level verdict scoring
 
 ---
 
-## 📄 License
+## Notes on Confidence
 
-MIT License — Built for research, OSINT, and educational purposes.
+- **Evidence confidence** comes from the stance classifier output.
+- **Claim confidence** is based on the supporting or contradicting evidence that each side finds.
+- **Article confidence** is computed from the scored distribution across `REAL`, `FAKE`, and `MISLEADING`.
+
+Because the article verdict is now tied to claim-level outcomes, the displayed label should better match the visible evidence.
+
+---
+
+## License
+
+MIT License.
