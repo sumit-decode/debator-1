@@ -1,10 +1,9 @@
-"""
-Stance Detector
-Uses Groq to determine whether evidence SUPPORTS, CONTRADICTS,
-or is NEUTRAL to a claim.
-"""
+"""Stance detection utilities backed by Groq."""
+from __future__ import annotations
+
 import logging
 import time
+from functools import lru_cache
 
 from tools.groq_client import groq_chat_json
 
@@ -27,7 +26,7 @@ SYSTEM_PROMPT = """You are a stance classification system for fact-checking.
 Given a factual claim and an evidence passage, decide whether the evidence:
 - SUPPORTS the claim
 - CONTRADICTS the claim
-- is NEUTRAL / insufficient
+- is NEUTRAL or insufficient
 
 Rules:
 1. Use SUPPORT only when the evidence directly backs the claim.
@@ -44,20 +43,27 @@ Respond in JSON only:
 
 
 def detect_stance(claim: str, evidence: str, max_retries: int = 3) -> dict:
-    """
-    Detect whether evidence supports or contradicts a claim using Groq.
+    """Classify the stance of an evidence passage against a claim."""
+    clean_claim = str(claim or "").strip()
+    clean_evidence = str(evidence or "").strip()
+    if not clean_claim or not clean_evidence:
+        return _neutral_result("empty_input")
 
-    Args:
-        claim: The factual claim to check
-        evidence: The evidence text to evaluate
-        max_retries: Retries if the model response is empty or malformed
+    return _detect_stance_cached(clean_claim, clean_evidence, max_retries)
 
-    Returns:
-        {"stance": "SUPPORT"|"CONTRADICT"|"NEUTRAL", "confidence": 0.0-1.0}
-    """
-    if not evidence or not claim:
-        return {"stance": "NEUTRAL", "confidence": 0.0}
 
+def batch_detect_stance(claim: str, evidence_list: list[str]) -> list[dict]:
+    """Score multiple evidence passages against a single claim."""
+    results = []
+    for evidence in evidence_list:
+        results.append(detect_stance(claim, evidence))
+        time.sleep(0.1)
+    return results
+
+
+@lru_cache(maxsize=512)
+def _detect_stance_cached(claim: str, evidence: str, max_retries: int) -> dict:
+    """Cache identical stance checks to reduce duplicate Groq calls."""
     for attempt in range(max_retries):
         try:
             data = groq_chat_json(
@@ -75,45 +81,32 @@ def detect_stance(claim: str, evidence: str, max_retries: int = 3) -> dict:
                 temperature=0.0,
                 max_tokens=150,
                 max_retries=2,
+                raise_on_parse_error=True,
             )
-
-            if not data:
-                raise ValueError("Groq returned empty or invalid JSON.")
 
             parsed = _parse_result(data)
             if parsed["confidence"] == 0.0 and not str(data.get("stance", "")).strip():
                 raise ValueError(f"Missing stance label in response: {data}")
 
+            parsed["provider"] = "groq"
+            parsed["used_fallback"] = False
+            parsed["error"] = None
             return parsed
-
-        except Exception as e:
-            logger.warning(f"Stance detection attempt {attempt + 1} failed: {e}")
+        except Exception as exc:
+            logger.warning("Stance detection attempt %s failed: %s", attempt + 1, exc)
             if attempt < max_retries - 1:
                 time.sleep(1.5)
 
-    logger.error("All stance detection attempts failed — returning NEUTRAL")
-    return {"stance": "NEUTRAL", "confidence": 0.0}
+    logger.error("All stance detection attempts failed; returning neutral fallback")
+    return _neutral_result("classification_failed")
 
 
-def batch_detect_stance(claim: str, evidence_list: list[str]) -> list[dict]:
-    """
-    Score multiple evidence texts against a single claim.
-    Includes small delays between calls.
-    """
-    results = []
-    for evidence in evidence_list:
-        result = detect_stance(claim, evidence)
-        results.append(result)
-        time.sleep(0.1)
-    return results
-
-
-def _parse_result(result) -> dict:
+def _parse_result(result: object) -> dict:
     """
     Normalize stance outputs from Groq.
 
     This parser also tolerates the old Hugging Face-style list output so the
-    rest of the project and tests stay robust during the transition.
+    rest of the project remains stable during the transition.
     """
     try:
         if isinstance(result, dict):
@@ -126,10 +119,7 @@ def _parse_result(result) -> dict:
 
         scores = result
         if isinstance(result, list) and result:
-            if isinstance(result[0], list):
-                scores = result[0]
-            else:
-                scores = result
+            scores = result[0] if isinstance(result[0], list) else result
 
         if isinstance(scores, list) and scores:
             best = max(scores, key=lambda item: item.get("score", 0))
@@ -138,11 +128,21 @@ def _parse_result(result) -> dict:
                 "stance": STANCE_LABEL_MAP.get(raw_label, "NEUTRAL"),
                 "confidence": round(_clamp(best.get("score", 0.0)), 3),
             }
-
-    except Exception as e:
-        logger.warning(f"Failed to parse stance result: {e} — raw: {result}")
+    except Exception as exc:
+        logger.warning("Failed to parse stance result: %s; raw=%s", exc, result)
 
     return {"stance": "NEUTRAL", "confidence": 0.0}
+
+
+def _neutral_result(reason: str) -> dict:
+    """Return a neutral fallback result with provider metadata."""
+    return {
+        "stance": "NEUTRAL",
+        "confidence": 0.0,
+        "provider": "groq",
+        "used_fallback": True,
+        "error": reason,
+    }
 
 
 def _clamp(value: float | int) -> float:

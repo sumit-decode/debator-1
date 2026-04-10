@@ -1,82 +1,53 @@
-"""
-Judge Agent
-Weighs evidence from both Verifier and Falsifier agents.
-Produces per-claim verdicts and an overall article verdict.
-"""
+"""Judge agent for claim-level and article-level verdicts."""
+from __future__ import annotations
+
 import logging
 
 from tools.groq_client import groq_chat_json
 
 logger = logging.getLogger(__name__)
 
+CLAIM_VERDICTS = {"SUPPORTED", "REFUTED", "UNVERIFIABLE"}
 
 
 def judge_debate(verifier_report: dict, falsifier_report: dict, progress_callback=None) -> dict:
-    """
-    Judge the debate between Verifier and Falsifier.
-
-    Args:
-        verifier_report: Full report from verify_claims()
-        falsifier_report: Full report from falsify_claims()
-        progress_callback: Optional callable(step, total, status)
-
-    Returns:
-        {
-            "claim_verdicts": [
-                {
-                    "claim": str,
-                    "verdict": "SUPPORTED" | "REFUTED" | "UNVERIFIABLE",
-                    "confidence": float,
-                    "reasoning": str
-                }
-            ],
-            "overall_verdict": "REAL" | "FAKE" | "MISLEADING",
-            "overall_confidence": float,
-            "reasoning": str,
-            "summary": str
-        }
-    """
-    ver_claims = verifier_report["claim_reports"]
-    fal_claims = falsifier_report["claim_reports"]
+    """Judge the debate between verifier and falsifier reports."""
+    verifier_claims = verifier_report.get("claim_reports", [])
+    falsifier_claims = falsifier_report.get("claim_reports", [])
 
     verdicts = []
-    total = len(ver_claims)
+    total = len(verifier_claims)
 
-    for i in range(total):
-        ver = ver_claims[i]
-        fal = fal_claims[i] if i < len(fal_claims) else None
-
+    for index, verifier_claim in enumerate(verifier_claims):
+        falsifier_claim = falsifier_claims[index] if index < len(falsifier_claims) else None
         if progress_callback:
-            progress_callback(i, total, f"Judging claim {i + 1}: {ver['claim'][:50]}...")
-
-        verdicts.append(_judge_single(ver, fal))
+            progress_callback(index, total, f"Judging claim {index + 1}: {verifier_claim.get('claim', '')[:50]}...")
+        verdicts.append(_judge_single(verifier_claim, falsifier_claim))
 
     if progress_callback:
         progress_callback(total, total, "Determining final verdict...")
 
     overall = _overall_verdict(
         verdicts,
-        verifier_report["overall_assessment"],
-        falsifier_report["overall_assessment"],
+        verifier_report.get("overall_assessment", ""),
+        falsifier_report.get("overall_assessment", ""),
     )
-
     return {"claim_verdicts": verdicts, **overall}
 
 
-def _judge_single(ver: dict, fal: dict | None) -> dict:
+def _judge_single(verifier_claim: dict, falsifier_claim: dict | None) -> dict:
     """Judge one claim by weighing both agents' evidence and arguments."""
-    claim = ver["claim"]
+    claim = str(verifier_claim.get("claim", "")).strip()
+    verifier_argument = verifier_claim.get("argument", "")
+    verifier_confidence = _clamp(verifier_claim.get("confidence", 0.0))
+    verifier_count = int(verifier_claim.get("evidence_count", 0) or 0)
+    verifier_evidence = _format_evidence_block(verifier_claim.get("supporting_evidence", []))
 
-    ver_arg = ver["argument"]
-    ver_conf = ver["confidence"]
-    ver_n = ver["evidence_count"]
-    ver_evidence_block = _format_evidence_block(ver.get("supporting_evidence", []))
-
-    fal_arg = fal["argument"] if fal else "No falsification attempted."
-    fal_conf = fal.get("confidence", 0) if fal else 0
-    fal_n = fal.get("evidence_count", 0) if fal else 0
-    fal_evidence_block = _format_evidence_block(
-        fal.get("contradicting_evidence", []) if fal else []
+    falsifier_argument = falsifier_claim.get("argument", "No falsification attempted.") if falsifier_claim else "No falsification attempted."
+    falsifier_confidence = _clamp(falsifier_claim.get("confidence", 0.0)) if falsifier_claim else 0.0
+    falsifier_count = int(falsifier_claim.get("evidence_count", 0) or 0) if falsifier_claim else 0
+    falsifier_evidence = _format_evidence_block(
+        falsifier_claim.get("contradicting_evidence", []) if falsifier_claim else []
     )
 
     try:
@@ -89,8 +60,8 @@ def _judge_single(ver: dict, fal: dict | None) -> dict:
                         "You must weigh evidence from both sides and deliver a verdict.\n\n"
                         "RULES:\n"
                         "1. Prioritize the raw evidence over each agent's rhetoric\n"
-                        "2. Consider evidence quantity AND quality\n"
-                        "3. Official / institutional sources carry more weight\n"
+                        "2. Consider evidence quantity and quality\n"
+                        "3. Official or institutional sources carry more weight\n"
                         "4. If evidence is inconclusive from both sides, return UNVERIFIABLE\n"
                         "5. Be specific about which evidence influenced your decision\n\n"
                         "Respond in JSON:\n"
@@ -106,19 +77,19 @@ def _judge_single(ver: dict, fal: dict | None) -> dict:
                     "content": (
                         f"CLAIM: {claim}\n\n"
                         f"{'=' * 40}\n"
-                        f"VERIFIER'S CASE (Pro-Truth)\n"
+                        "VERIFIER CASE\n"
                         f"{'=' * 40}\n"
-                        f"Supporting evidence found: {ver_n}\n"
-                        f"Average confidence: {ver_conf:.0%}\n"
-                        f"Top supporting evidence:\n{ver_evidence_block}\n\n"
-                        f"Argument:\n{ver_arg}\n\n"
+                        f"Supporting evidence found: {verifier_count}\n"
+                        f"Average confidence: {verifier_confidence:.0%}\n"
+                        f"Top supporting evidence:\n{verifier_evidence}\n\n"
+                        f"Argument:\n{verifier_argument}\n\n"
                         f"{'=' * 40}\n"
-                        f"FALSIFIER'S CASE (Counter-Truth)\n"
+                        "FALSIFIER CASE\n"
                         f"{'=' * 40}\n"
-                        f"Contradicting evidence found: {fal_n}\n"
-                        f"Average confidence: {fal_conf:.0%}\n"
-                        f"Top contradicting evidence:\n{fal_evidence_block}\n\n"
-                        f"Argument:\n{fal_arg}\n\n"
+                        f"Contradicting evidence found: {falsifier_count}\n"
+                        f"Average confidence: {falsifier_confidence:.0%}\n"
+                        f"Top contradicting evidence:\n{falsifier_evidence}\n\n"
+                        f"Argument:\n{falsifier_argument}\n\n"
                         "Deliver your verdict."
                     ),
                 },
@@ -129,40 +100,39 @@ def _judge_single(ver: dict, fal: dict | None) -> dict:
 
         return {
             "claim": claim,
-            "verdict": data.get("verdict", "UNVERIFIABLE"),
-            "confidence": data.get("confidence", 0.5),
-            "reasoning": data.get("reasoning", ""),
+            "verdict": _normalize_claim_verdict(data.get("verdict")),
+            "confidence": _clamp(data.get("confidence", 0.5)),
+            "reasoning": str(data.get("reasoning", "")).strip(),
         }
-
-    except Exception as e:
-        logger.error(f"Judging failed for claim: {e}")
+    except Exception as exc:
+        logger.error("Judging failed for claim '%s': %s", claim[:80], exc)
         return {
             "claim": claim,
             "verdict": "UNVERIFIABLE",
             "confidence": 0.0,
-            "reasoning": "Error during judgement; could not reach a verdict.",
+            "reasoning": "Error during judgment; could not reach a verdict.",
         }
 
 
-def _overall_verdict(verdicts: list, ver_assessment: str, fal_assessment: str) -> dict:
+def _overall_verdict(verdicts: list[dict], verifier_assessment: str, falsifier_assessment: str) -> dict:
     """Determine the overall article verdict from all per-claim results."""
     metrics = _score_overall_verdict(verdicts)
     overall = metrics["overall_verdict"]
     confidence = metrics["overall_confidence"]
     scores = metrics["confidence_metrics"]
 
-    supported = sum(1 for v in verdicts if v.get("verdict") == "SUPPORTED")
-    refuted = sum(1 for v in verdicts if v.get("verdict") == "REFUTED")
-    unverifiable = sum(1 for v in verdicts if v.get("verdict") == "UNVERIFIABLE")
+    supported = sum(1 for verdict in verdicts if verdict.get("verdict") == "SUPPORTED")
+    refuted = sum(1 for verdict in verdicts if verdict.get("verdict") == "REFUTED")
+    unverifiable = sum(1 for verdict in verdicts if verdict.get("verdict") == "UNVERIFIABLE")
 
     reasoning = (
-        f"Overall verdict is based on claim-level outcomes rather than a final free-form model guess. "
+        "Overall verdict is based on claim-level outcomes rather than a final free-form model guess. "
         f"Supported claims contributed most to REAL ({scores['REAL']:.0%}), "
         f"refuted claims contributed most to FAKE ({scores['FAKE']:.0%}), and "
         f"mixed or unverifiable claims contributed most to MISLEADING ({scores['MISLEADING']:.0%}). "
         f"Claim counts: {supported} supported, {refuted} refuted, {unverifiable} unverifiable. "
-        f"Verifier summary: {ver_assessment[:180] or 'No verifier summary.'} "
-        f"Falsifier summary: {fal_assessment[:180] or 'No falsifier summary.'}"
+        f"Verifier summary: {verifier_assessment[:180] or 'No verifier summary.'} "
+        f"Falsifier summary: {falsifier_assessment[:180] or 'No falsifier summary.'}"
     )
 
     summary_map = {
@@ -184,10 +154,9 @@ def _score_overall_verdict(verdicts: list[dict]) -> dict:
     """
     Convert claim-level verdicts into stable article-level scores.
 
-    The old implementation asked an LLM for the final article label, which made
-    the headline verdict drift toward "MISLEADING" even when the claim outcomes
-    clearly leaned real or fake. Here we deterministically score three article
-    buckets and choose the strongest one.
+    This avoids the previous behavior where a final unconstrained LLM pass could
+    overuse the MISLEADING label even when the claim outcomes leaned clearly real
+    or fake.
     """
     if not verdicts:
         return {
@@ -201,7 +170,7 @@ def _score_overall_verdict(verdicts: list[dict]) -> dict:
     misleading_points = 0.0
 
     for verdict in verdicts:
-        label = verdict.get("verdict", "UNVERIFIABLE")
+        label = _normalize_claim_verdict(verdict.get("verdict"))
         confidence = _clamp(verdict.get("confidence", 0.5))
 
         if label == "SUPPORTED":
@@ -213,8 +182,6 @@ def _score_overall_verdict(verdicts: list[dict]) -> dict:
         else:
             misleading_points += 0.45 + (confidence * 0.35)
 
-    # Conflicting support and refutation should visibly increase the
-    # misleading bucket even when both sides look strong.
     misleading_points += min(real_points, fake_points) * 0.9
 
     total = real_points + fake_points + misleading_points
@@ -235,15 +202,12 @@ def _score_overall_verdict(verdicts: list[dict]) -> dict:
     overall_verdict, top_score = ranked[0]
     runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
 
-    # If real and fake are very close, prefer misleading even if it is not the
-    # single largest bucket, because the article is genuinely mixed.
     if abs(scores["REAL"] - scores["FAKE"]) <= 0.08 and max(scores["REAL"], scores["FAKE"]) >= 0.3:
         overall_verdict = "MISLEADING"
         top_score = scores["MISLEADING"]
         runner_up = max(scores["REAL"], scores["FAKE"])
 
     confidence = round(max(top_score, top_score - (runner_up * 0.15)), 3)
-
     return {
         "overall_verdict": overall_verdict,
         "overall_confidence": confidence,
@@ -251,11 +215,11 @@ def _score_overall_verdict(verdicts: list[dict]) -> dict:
     }
 
 
-def _fallback_verdict(verdicts: list) -> dict:
-    """Heuristic fallback when LLM verdict fails."""
+def _fallback_verdict(verdicts: list[dict]) -> dict:
+    """Heuristic fallback when judge verdict generation fails."""
     metrics = _score_overall_verdict(verdicts)
-    supported = sum(1 for v in verdicts if v["verdict"] == "SUPPORTED")
-    refuted = sum(1 for v in verdicts if v["verdict"] == "REFUTED")
+    supported = sum(1 for verdict in verdicts if verdict.get("verdict") == "SUPPORTED")
+    refuted = sum(1 for verdict in verdicts if verdict.get("verdict") == "REFUTED")
     total = len(verdicts)
 
     return {
@@ -268,6 +232,14 @@ def _fallback_verdict(verdicts: list) -> dict:
         "summary": f"Article appears to be {metrics['overall_verdict'].lower()} based on claim analysis.",
         "confidence_metrics": metrics["confidence_metrics"],
     }
+
+
+def _normalize_claim_verdict(value: object) -> str:
+    """Normalize claim verdict labels from the LLM."""
+    label = str(value or "UNVERIFIABLE").strip().upper()
+    if label not in CLAIM_VERDICTS:
+        return "UNVERIFIABLE"
+    return label
 
 
 def _clamp(value: float | int) -> float:
@@ -286,11 +258,11 @@ def _format_evidence_block(evidence: list[dict], top_k: int = 3) -> str:
     lines = []
     ranked = sorted(evidence, key=lambda item: item.get("confidence", 0), reverse=True)
     for item in ranked[:top_k]:
-        excerpt = (item.get("full_text") or item.get("snippet") or "").replace("\n", " ").strip()
+        excerpt = str(item.get("full_text") or item.get("snippet") or "").replace("\n", " ").strip()
         excerpt = excerpt[:280] if excerpt else "No excerpt available."
         lines.append(
             f"- {item.get('title', 'Untitled source')} | "
-            f"{item.get('stance', 'UNKNOWN')} {item.get('confidence', 0):.0%} | "
+            f"{item.get('stance', 'UNKNOWN')} {_clamp(item.get('confidence', 0)):.0%} | "
             f"{item.get('url', 'No URL')}\n"
             f"  {excerpt}"
         )

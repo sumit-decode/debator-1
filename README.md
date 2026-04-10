@@ -57,6 +57,7 @@ This avoids the old issue where a final free-form LLM call could overuse `MISLEA
 - **Groq-first pipeline:** claim extraction, stance classification, and judging all run through Groq.
 - **Deterministic article scoring:** article verdicts are computed from claim outcomes instead of relying on a final unconstrained model guess.
 - **Confidence visualization:** the UI shows both the winning confidence and a three-way metric bar for `REAL`, `FAKE`, and `MISLEADING`.
+- **Run-health visibility:** the UI surfaces scraped-source counts, usable evidence signals, and degraded stance-classification fallbacks.
 - **Parallel execution:** verifier and falsifier run concurrently, and evidence scoring is parallelized per claim.
 - **Result caching:** repeated analysis of the same article is served from session cache.
 - **JSON export:** full analysis can be downloaded for later review.
@@ -127,6 +128,8 @@ debater/
 |   |-- stance_detector.py
 |   `-- web_search.py
 |-- tests/
+|   |-- test_agent_queries.py
+|   |-- test_claim_extractor.py
 |   |-- test_judge_agent.py
 |   |-- test_overall_verdict.py
 |   `-- test_stance_detector.py
@@ -147,6 +150,8 @@ py -m unittest discover tests -v
 ```
 
 Current tests cover:
+- claim extraction sanitization and fallback behavior
+- query normalization for verifier and falsifier search generation
 - stance result parsing
 - evidence formatting for the judge
 - deterministic article-level verdict scoring

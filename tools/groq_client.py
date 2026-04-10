@@ -1,19 +1,15 @@
-"""
-══════════════════════════════════════════════════════════════
-  Shared Groq Client
-  Centralized LLM client with retry logic, rate-limit handling,
-  and exponential backoff for 429/503 errors.
-══════════════════════════════════════════════════════════════
-"""
+"""Shared Groq client helpers with retry and JSON parsing support."""
+from __future__ import annotations
+
 import json
 import logging
-import time
 import threading
+import time
 from functools import lru_cache
 
 from groq import Groq
 
-from config import GROQ_API_KEY, GROQ_MODEL, API_CALL_DELAY
+from config import API_CALL_DELAY, GROQ_API_KEY, GROQ_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +18,7 @@ _client_lock = threading.Lock()
 
 @lru_cache(maxsize=1)
 def get_groq_client() -> Groq:
-    """Create the Groq client lazily — thread-safe singleton."""
+    """Create the Groq client lazily as a thread-safe singleton."""
     with _client_lock:
         if not GROQ_API_KEY:
             raise ValueError("GROQ_API_KEY is not configured.")
@@ -38,50 +34,33 @@ def groq_chat(
     max_retries: int = 3,
     model: str | None = None,
 ) -> str:
-    """
-    Call Groq chat completion with automatic retry on rate-limit (429)
-    and server errors (500/502/503).
-
-    Args:
-        messages: Chat messages list
-        temperature: Sampling temperature
-        max_tokens: Max response tokens
-        json_mode: If True, request JSON response format
-        max_retries: Number of retry attempts
-        model: Override model (defaults to config GROQ_MODEL)
-
-    Returns:
-        The response content string
-
-    Raises:
-        Exception: After all retries exhausted
-    """
+    """Call Groq chat completion with basic retry logic."""
     client = get_groq_client()
     target_model = model or GROQ_MODEL
+    prepared_messages = [
+        {"role": message.get("role", "user"), "content": str(message.get("content", ""))}
+        for message in messages
+    ]
 
     kwargs = {
         "model": target_model,
-        "messages": messages,
+        "messages": prepared_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-        # Groq requires the word "json" in messages when using json_object mode.
-        # Auto-inject if not already present.
-        has_json_word = any(
-            "json" in (m.get("content") or "").lower() for m in messages
-        )
-        if not has_json_word:
-            # Append instruction to the last system message, or add one
-            patched = False
-            for m in kwargs["messages"]:
-                if m["role"] == "system":
-                    m["content"] += "\nRespond in JSON format."
-                    patched = True
+        if not any("json" in message["content"].lower() for message in prepared_messages):
+            for message in prepared_messages:
+                if message["role"] == "system":
+                    message["content"] += "\nRespond in JSON format."
                     break
-            if not patched:
-                kwargs["messages"].insert(0, {"role": "system", "content": "Respond in JSON format."})
+            else:
+                prepared_messages.insert(
+                    0,
+                    {"role": "system", "content": "Respond in JSON format."},
+                )
 
     last_error = None
 
@@ -89,32 +68,38 @@ def groq_chat(
         try:
             time.sleep(API_CALL_DELAY)
             response = client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content
-
-        except Exception as e:
-            last_error = e
-            error_str = str(e).lower()
-
-            # Rate limit (429) or server error (500/502/503)
-            is_retryable = any(
-                code in error_str
-                for code in ["429", "rate_limit", "too many requests", "500", "502", "503"]
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            last_error = exc
+            error_text = str(exc).lower()
+            retryable = any(
+                token in error_text
+                for token in [
+                    "429",
+                    "rate_limit",
+                    "too many requests",
+                    "500",
+                    "502",
+                    "503",
+                    "timeout",
+                ]
             )
 
-            if is_retryable and attempt < max_retries - 1:
-                wait = min(2 ** (attempt + 1), 30)  # 2s, 4s, 8s... max 30s
+            if retryable and attempt < max_retries - 1:
+                wait_seconds = min(2 ** (attempt + 1), 30)
                 logger.warning(
-                    f"Groq API error (attempt {attempt + 1}/{max_retries}): {e} "
-                    f"— retrying in {wait}s"
+                    "Groq API error (attempt %s/%s): %s; retrying in %ss",
+                    attempt + 1,
+                    max_retries,
+                    exc,
+                    wait_seconds,
                 )
-                time.sleep(wait)
-            elif not is_retryable:
-                # Non-retryable error — fail immediately
-                raise
-            else:
-                logger.error(
-                    f"Groq API failed after {max_retries} attempts: {e}"
-                )
+                time.sleep(wait_seconds)
+                continue
+
+            if retryable:
+                logger.error("Groq API failed after %s attempts: %s", max_retries, exc)
+            raise
 
     raise last_error  # type: ignore[misc]
 
@@ -125,11 +110,9 @@ def groq_chat_json(
     temperature: float = 0.3,
     max_tokens: int = 800,
     max_retries: int = 3,
+    raise_on_parse_error: bool = False,
 ) -> dict:
-    """
-    Call Groq and parse the response as JSON.
-    Falls back to empty dict on parse failure.
-    """
+    """Call Groq and parse the response as JSON."""
     text = groq_chat(
         messages,
         temperature=temperature,
@@ -137,8 +120,19 @@ def groq_chat_json(
         json_mode=True,
         max_retries=max_retries,
     )
+
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.error(f"Groq response was not valid JSON: {e}")
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.error("Groq response was not valid JSON: %s", exc)
+        if raise_on_parse_error:
+            raise
         return {}
+
+    if isinstance(parsed, dict):
+        return parsed
+
+    logger.error("Groq JSON response was not an object: %s", type(parsed).__name__)
+    if raise_on_parse_error:
+        raise ValueError("Groq JSON response was not an object.")
+    return {}
